@@ -173,6 +173,10 @@ stellar contract invoke \
 
 ---
 
+## project description
+
+## future scope 
+
 ## Project Structure
 
 ```
@@ -185,6 +189,12 @@ stellaroid_earn/
 ```
 
 ---
+ 
+## Deployed Contract Details
+[1] https://stellar.expert/explorer/testnet/tx/996dbeeb285df8757c7c11d817e8935138be2daa6f1c05a9f0263b5aff466d34
+[2] https://lab.stellar.org/r/testnet/contract/CB7GMFBOEW3CYATQOPGEZSJQ5FKW5PDGISTIJYNYVB74IHBIELWFIWAS
+ 
+![screenshot](path/to/image.png) 
 
 ## License
 
