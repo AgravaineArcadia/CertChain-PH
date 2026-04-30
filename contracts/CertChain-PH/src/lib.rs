@@ -4,13 +4,12 @@
 mod test;
 
 use soroban_sdk::{
-    contract, contractevent, contractimpl, contracttype, contracterror,
-    Address, BytesN, Env,
+    contract, contractimpl, contracttype, contracterror,
+    symbol_short, Address, BytesN, Env,
 };
 
 // ─── Storage Keys ─────────────────────────────────────────────────────────────
 
-/// Keys used to read/write contract state in persistent storage.
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -22,7 +21,6 @@ pub enum DataKey {
 
 // ─── Data Types ───────────────────────────────────────────────────────────────
 
-/// On-chain record for a single issued certificate.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct CertRecord {
@@ -35,9 +33,8 @@ pub struct CertRecord {
 }
 
 // ─── Error Codes ──────────────────────────────────────────────────────────────
-// #[contracterror] is required so Soroban can convert this enum to/from
-// soroban_sdk::Error. Without it, functions returning Result<_, Error>
-// will not compile under #[contractimpl].
+// #[contracterror] generates the From<soroban_sdk::Error> impls that
+// #[contractimpl] requires for any function returning Result<_, Error>.
 
 #[contracterror]
 #[derive(Clone, Debug, PartialEq)]
@@ -50,42 +47,6 @@ pub enum Error {
     Unauthorized      = 3,
     /// XLM reward was already paid for this certificate
     AlreadyRewarded   = 4,
-}
-
-// ─── Events ───────────────────────────────────────────────────────────────────
-// SDK v22 deprecates env.events().publish(). Use #[contractevent] structs
-// with .emit(&env) instead — each struct is one strongly-typed on-chain event.
-
-/// Emitted when a certificate is successfully registered on-chain.
-#[contractevent]
-pub struct CertRegistered {
-    pub cert_hash: BytesN<32>,
-    pub student:   Address,
-}
-
-/// Emitted when a certificate is verified (valid or invalid).
-#[contractevent]
-pub struct CertVerified {
-    pub cert_hash:      BytesN<32>,
-    pub expected_owner: Address,
-    pub valid:          bool,
-}
-
-/// Emitted when the XLM reward signal fires for a student.
-/// The dApp relayer listens for this to execute the actual transfer.
-#[contractevent]
-pub struct CertRewarded {
-    pub cert_hash: BytesN<32>,
-    pub student:   Address,
-}
-
-/// Emitted when an employer signals a payment intent to a verified student.
-#[contractevent]
-pub struct CertPayment {
-    pub cert_hash:      BytesN<32>,
-    pub employer:       Address,
-    pub student:        Address,
-    pub amount_stroops: i128,
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -110,14 +71,13 @@ impl StellaroidEarn {
     // ── register_certificate ────────────────────────────────────────────────
 
     /// Registers a certificate hash + student wallet on-chain.
-    ///
     /// - Requires admin (registrar) auth.
     /// - Rejects duplicate hashes — prevents re-issuance and tamper attempts.
     /// - Stores a CertRecord keyed by cert_hash.
-    /// - Emits CertRegistered so off-chain indexers can react instantly.
+    /// - Emits (cert_reg, student) → cert_hash event for off-chain indexers.
     pub fn register_certificate(
         env: Env,
-        cert_hash:      BytesN<32>,
+        cert_hash: BytesN<32>,
         student_wallet: Address,
     ) -> Result<(), Error> {
         // Only the admin (university registrar) may issue certificates
@@ -139,12 +99,11 @@ impl StellaroidEarn {
         };
         env.storage().persistent().set(&key, &record);
 
-        // Emit on-chain event for dApp / indexer
-        CertRegistered {
+        // Emit on-chain event: topic = (cert_reg, student), data = cert_hash
+        env.events().publish(
+            (symbol_short!("cert_reg"), student_wallet),
             cert_hash,
-            student: student_wallet,
-        }
-        .emit(&env);
+        );
 
         Ok(())
     }
@@ -153,12 +112,10 @@ impl StellaroidEarn {
 
     /// Returns true if cert_hash is registered AND the stored owner matches
     /// expected_owner. Returns false otherwise (no panic).
-    ///
-    /// Emits CertVerified in all cases — employers and DAOs use this event
-    /// as an auditable proof of verification.
+    /// Emits (cert_ver, expected_owner) → (cert_hash, valid) in all cases.
     pub fn verify_certificate(
-        env:            Env,
-        cert_hash:      BytesN<32>,
+        env: Env,
+        cert_hash: BytesN<32>,
         expected_owner: Address,
     ) -> bool {
         let key = DataKey::Certificate(cert_hash.clone());
@@ -174,25 +131,22 @@ impl StellaroidEarn {
         };
 
         // Always emit — verification attempts are permanently auditable
-        CertVerified {
-            cert_hash,
-            expected_owner,
-            valid,
-        }
-        .emit(&env);
+        env.events().publish(
+            (symbol_short!("cert_ver"), expected_owner),
+            (cert_hash, valid),
+        );
 
         valid
     }
 
     // ── reward_student ───────────────────────────────────────────────────────
 
-    /// Marks the reward as paid and emits CertRewarded.
-    ///
-    /// The contract signals intent; the dApp relayer executes the actual XLM
+    /// Marks the reward as paid and emits (cert_rwd, student) → cert_hash.
+    /// The dApp relayer listens for this event to execute the actual XLM
     /// transfer from the admin wallet to the student wallet on Stellar.
-    /// Follows checks-effects-interactions: storage is updated before emit.
+    /// Follows checks-effects-interactions: storage updated before emit.
     pub fn reward_student(
-        env:       Env,
+        env: Env,
         cert_hash: BytesN<32>,
     ) -> Result<(), Error> {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
@@ -211,15 +165,14 @@ impl StellaroidEarn {
             return Err(Error::AlreadyRewarded);
         }
 
-        // Update state BEFORE emitting (checks-effects-interactions pattern)
+        // Update state BEFORE emitting (checks-effects-interactions)
         record.reward_paid = true;
         env.storage().persistent().set(&key, &record);
 
-        CertRewarded {
+        env.events().publish(
+            (symbol_short!("cert_rwd"), record.owner),
             cert_hash,
-            student: record.owner,
-        }
-        .emit(&env);
+        );
 
         Ok(())
     }
@@ -227,14 +180,14 @@ impl StellaroidEarn {
     // ── link_payment ─────────────────────────────────────────────────────────
 
     /// Employer-triggered payment intent.
-    ///
-    /// Confirms the certificate exists, then emits CertPayment so the dApp
-    /// can execute the XLM / USDC transfer from the employer's wallet to the
-    /// verified student wallet. amount_stroops: 1 XLM = 10_000_000 stroops.
+    /// Confirms the certificate exists, then emits
+    /// (cert_pay, employer) → (cert_hash, student, amount_stroops)
+    /// so the dApp can execute the XLM/USDC transfer.
+    /// amount_stroops: 1 XLM = 10_000_000 stroops.
     pub fn link_payment(
-        env:            Env,
-        cert_hash:      BytesN<32>,
-        employer:       Address,
+        env: Env,
+        cert_hash: BytesN<32>,
+        employer: Address,
         amount_stroops: i128,
     ) -> Result<(), Error> {
         // Employer must sign this transaction
@@ -248,13 +201,10 @@ impl StellaroidEarn {
             .get(&key)
             .ok_or(Error::NotFound)?;
 
-        CertPayment {
-            cert_hash,
-            employer,
-            student: record.owner,
-            amount_stroops,
-        }
-        .emit(&env);
+        env.events().publish(
+            (symbol_short!("cert_pay"), employer),
+            (cert_hash, record.owner, amount_stroops),
+        );
 
         Ok(())
     }
@@ -264,7 +214,7 @@ impl StellaroidEarn {
     /// Read-only helper — returns the stored CertRecord or None.
     /// Used by the frontend to display certificate status.
     pub fn get_certificate(
-        env:       Env,
+        env: Env,
         cert_hash: BytesN<32>,
     ) -> Option<CertRecord> {
         env.storage()
@@ -272,5 +222,3 @@ impl StellaroidEarn {
             .get(&DataKey::Certificate(cert_hash))
     }
 }
-
-mod test;
